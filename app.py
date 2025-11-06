@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import time
+import yfinance as yf
 
 # Configurazione pagina
 st.set_page_config(
@@ -11,13 +12,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# Import yfinance solo quando necessario (lazy loading)
-@st.cache_resource
-def load_yfinance():
-    """Carica yfinance solo quando serve"""
-    import yfinance as yf
-    return yf
-
 # Titolo e descrizione
 st.title("🔍 Market Scanner - Spring Detector")
 st.markdown("**Sistema di screening per identificare titoli in compressione prima del movimento**")
@@ -25,7 +19,7 @@ st.markdown("**Sistema di screening per identificare titoli in compressione prim
 # Sidebar con configurazioni
 st.sidebar.header("⚙️ Configurazioni")
 
-# Lista ticker predefiniti
+# Liste ticker
 FTSE_MIB = ['UCG.MI', 'ISP.MI', 'ENI.MI', 'ENEL.MI', 'TIT.MI', 'STM.MI', 'G.MI', 
             'RACE.MI', 'ATL.MI', 'STLAM.MI', 'BAMI.MI', 'CPR.MI', 'MB.MI', 
             'TEN.MI', 'CNHI.MI', 'AZM.MI', 'BMED.MI', 'SPM.MI', 'BGN.MI', 
@@ -73,21 +67,18 @@ st.sidebar.subheader("🎯 Soglie di Screening")
 min_score = st.sidebar.slider("Score minimo", 0, 100, 60, 5)
 max_results = st.sidebar.slider("Numero massimo risultati", 10, 100, 50, 10)
 
-# Funzione per scaricare dati con timeout e retry
-def download_stock_data(ticker, yf, period="60d", max_retries=2):
+# Funzione per scaricare dati
+@st.cache_data(ttl=3600)
+def download_stock_data(ticker, period="60d"):
     """Scarica dati storici per un ticker con gestione errori"""
-    for attempt in range(max_retries):
-        try:
-            stock = yf.Ticker(ticker)
-            df = stock.history(period=period, timeout=10)
-            if df.empty:
-                return None
-            return df
-        except Exception as e:
-            if attempt == max_retries - 1:
-                return None
-            time.sleep(0.5)
-    return None
+    try:
+        stock = yf.Ticker(ticker)
+        df = stock.history(period=period)
+        if df.empty:
+            return None
+        return df
+    except Exception as e:
+        return None
 
 # Funzione per calcolare ATR
 def calculate_atr(df, period=14):
@@ -195,8 +186,11 @@ def calculate_compression_score(df):
         metrics['score'] = score
         
         # Aggiungi variazione giornaliera
-        metrics['daily_change'] = ((current_price - df['Close'].iloc[-2]) / 
-                                    df['Close'].iloc[-2] * 100)
+        if len(df) >= 2:
+            metrics['daily_change'] = ((current_price - df['Close'].iloc[-2]) / 
+                                        df['Close'].iloc[-2] * 100)
+        else:
+            metrics['daily_change'] = 0
         
         # Aggiungi volume corrente vs media
         current_volume = df['Volume'].iloc[-1]
@@ -214,10 +208,6 @@ if st.button("🚀 Avvia Scan", type="primary", use_container_width=True):
     if len(tickers) == 0:
         st.warning("⚠️ Seleziona almeno un mercato dalla sidebar!")
     else:
-        # Carica yfinance solo quando serve
-        with st.spinner("🔄 Inizializzazione sistema..."):
-            yf = load_yfinance()
-        
         st.markdown("---")
         st.subheader("📊 Scanning in corso...")
         
@@ -234,7 +224,7 @@ if st.button("🚀 Avvia Scan", type="primary", use_container_width=True):
             progress_bar.progress((i + 1) / total)
             
             # Scarica dati
-            df = download_stock_data(ticker, yf)
+            df = download_stock_data(ticker)
             
             if df is not None:
                 # Calcola score
@@ -256,10 +246,7 @@ if st.button("🚀 Avvia Scan", type="primary", use_container_width=True):
                 errors.append(ticker)
             
             # Pausa per rate limiting
-            if (i + 1) % 10 == 0:
-                time.sleep(0.5)
-            else:
-                time.sleep(0.1)
+            time.sleep(0.2)
         
         progress_bar.empty()
         status_text.empty()
@@ -284,18 +271,9 @@ if st.button("🚀 Avvia Scan", type="primary", use_container_width=True):
             
             st.markdown("---")
             
-            # Tabella risultati con formattazione
+            # Tabella risultati
             st.dataframe(
-                df_results.style.background_gradient(subset=['Score'], cmap='RdYlGn')
-                                .format({
-                                    'Prezzo': '{:.2f}',
-                                    'Var %': '{:+.2f}%',
-                                    'ATR Ratio': '{:.2f}',
-                                    'Range 10g %': '{:.2f}%',
-                                    'Vol Ratio': '{:.2f}',
-                                    'Dist MA50 %': '{:.2f}%',
-                                    'Vol vs Avg': '{:.2f}x'
-                                }),
+                df_results,
                 use_container_width=True,
                 height=600
             )
@@ -312,7 +290,7 @@ if st.button("🚀 Avvia Scan", type="primary", use_container_width=True):
             )
             
             # Mostra errori se presenti
-            if errors and len(errors) < 10:
+            if errors and len(errors) < 20:
                 with st.expander(f"⚠️ Titoli non analizzati ({len(errors)})"):
                     st.write(", ".join(errors))
             
@@ -356,15 +334,19 @@ else:
     4. Prossimità a livelli tecnici chiave
     5. Pattern di consolidamento
     
-    **Output:** Una watchlist di 30-60 titoli pronti per il prossimo movimento.
+    **Output:** Una watchlist di titoli pronti per il prossimo movimento.
     
-    **Passo successivo:** Condividi la lista con Claude per analisi catalyst e setup operativi.
-    
-    **💡 Suggerimento:** Per la prima volta, inizia selezionando solo FTSE MIB (37 titoli) 
-    per un test rapido. Poi espandi agli altri mercati.
+    **💡 Suggerimento:** Inizia selezionando solo FTSE MIB per un test rapido.
     """)
 
 # Footer
 st.markdown("---")
 st.caption("💡 Creato per individuare opportunità PRIMA del movimento | Aggiornamento dati: ultimi 60 giorni")
-st.caption("⚡ Versione ottimizzata con lazy loading e gestione errori avanzata")
+```
+
+## File requirements.txt aggiornato:
+```
+streamlit>=1.31.0
+yfinance>=0.2.36
+pandas>=2.0.0
+numpy>=1.24.0
